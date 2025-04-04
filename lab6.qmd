@@ -4,23 +4,203 @@ format: html
 editor: visual
 ---
 
-## Quarto
-
-Quarto enables you to weave together content and executable code into a finished document. To learn more about Quarto see <https://quarto.org>.
-
-## Running Code
-
-When you click the **Render** button a document will be generated that includes both content and the output of embedded code. You can embed code like this:
+Question 1:
 
 ```{r}
-1 + 1
+library(tidyverse)
+library(tidymodels)
+library(powerjoin)
+library(glue)
+library(vip)
+library(baguette)
+library(ggplot2)
+library(workflows)
+library(recipes)
+library(xgboost)
+library(rstanarm)
 ```
-
-You can add options to executable code like this
 
 ```{r}
-#| echo: false
-2 * 2
+root  <- 'https://gdex.ucar.edu/dataset/camels/file'
 ```
 
-The `echo: false` option disables the printing of code (only output is displayed).
+```{r}
+download.file('https://gdex.ucar.edu/dataset/camels/file/camels_attributes_v2.0.pdf', 
+              'data/camels_attributes_v2.0.pdf')
+```
+
+```{r}
+types <- c("clim", "geol", "soil", "topo", "vege", "hydro")
+```
+
+```{r}
+remote_files <- glue('{root}/camels_{types}.txt')
+data <- glue('data/camels_{types}.txt')
+walk2(remote_files, data, download.file, quiet = TRUE)
+camels <- map(data, read_delim, show_col_types = FALSE) 
+camels <- power_full_join(camels ,by = 'gauge_id')
+```
+
+```{r}
+##zero_q_freq represents that frequency of days witth Q = 0 mm/day.
+```
+
+Question 2:
+
+```{r}
+combined_value <- camels$aridity + camels$p_mean
+ggplot(data = camels, aes(x = gauge_lon, y = gauge_lat)) +
+  borders("state", colour = "gray") +
+  geom_point(aes(color = combined_value)) +
+  scale_color_gradient(low = "lavender", high = "navyblue") +
+  ggthemes::theme_map()
+```
+
+```{r}
+ggplot(data = camels, aes( x = aridity, y = p_mean)) +
+  geom_point(aes(color = combined_value)) + scale_color_gradient(low = "green", high = "darkgreen") +
+  ggthemes::theme_clean()
+```
+
+Question: 3
+
+```{r}
+set.seed(671)
+camels_select <- camels |>
+  mutate(logQmean = log(q_mean)) |>
+  select(logQmean, aridity, p_mean, pet_mean, p_seasonality)
+
+camels_split <- initial_split(camels_select, prop = 0.8)
+camels_train <- training(camels_split)
+camels_test <- testing(camels_split)
+
+camels_folds <- vfold_cv(camels_train, v = 10)
+```
+
+```{r}
+
+rec <- recipe(logQmean ~ ., data = camels_train) |>
+  step_log(all_predictors()) %>% 
+  step_interact(terms = ~ aridity:p_mean) |>
+  step_naomit(all_predictors(), all_outcomes()
+  )
+
+```
+
+```{r}
+boost_model <- boost_tree() |>
+  set_engine("xgboost") |>
+  set_mode("regression")
+
+print(boost_model)
+```
+
+```{r}
+neural_network_model <- bag_mlp(hidden_units = 5, penalty = 0.01) |>
+  set_engine("nnet") |>
+  set_mode("regression")
+
+print(neural_network_model)
+  
+```
+
+```{r}
+wf <- workflow_set(list(rec), list(boost_model, neural_network_model)) |>
+  workflow_map('fit_resamples', resamples = camels_folds)
+
+autoplot(wf)
+```
+
+```{r}
+## The linear and random forest models have lower variability than the boost and nueral network models. I would random forest model because it has the lowest range.
+```
+
+Question 4:
+
+```{r}
+##data splitting
+set.seed(671)
+camels_select <- camels |>
+  mutate(logQmean = log(q_mean)) |>
+  select(logQmean, aridity, p_mean, pet_mean, p_seasonality)
+
+camels_split <- initial_split(camels_select, prop = 0.75)
+camels_training <- training(camels_split)
+camels_testing <- testing(camels_split)
+
+camels_folds4 <- vfold_cv(camels_train, v = 10)
+  
+```
+
+```{r}
+##recipe
+second_rec <- recipe(logQmean ~ ., data = camels_training) |>
+  step_log(all_predictors()) |>
+  step_normalize(all_predictors()) |>
+  step_interact(terms = ~ aridity:p_mean) |>
+  step_naomit(all_predictors(), all_outcomes())
+
+## I chose this formula because I need all data that I selected to see if there is a relationship. Camels training is the data with the selected variables.
+
+```
+
+```{r}
+## define 3 models
+rand_model <- rand_forest() |>
+  set_engine("ranger") |>
+  set_mode("regression")
+
+linear_model <- linear_reg() |>
+  set_engine("stan") |>
+  set_mode("regression")
+
+decision_model <- decision_tree() |>
+  set_engine("rpart") |>
+  set_mode("regression")
+
+```
+
+```{r}
+##workflow set
+#wf4 <- workflow_set(list(second_rec), list(rand_model, linear_model, decision_model)) |>
+  #workflow_map('fit_resamples', resamples = camels_folds4)
+```
+
+```{r}
+##evaluation
+
+#autoplot(wf4)
+
+#rank_results(wf, rank_metric = "rsq", select_best = TRUE)
+
+##describe what model you think is best and why
+```
+
+```{r}
+##extract and evaluate
+
+#lm_model <- linear_reg() %>%
+  #set_engine("lm") %>%
+  #set_mode("regression")
+
+# Instantiate a workflow ...
+#lm_wf <- workflow() %>%
+  #add_recipe(rec) %>%
+ # add_model(linear_model) %>%
+  #fit(data = camels_train) 
+
+# Extract the model coefficients from the workflow
+#summary(extract_fit_engine(lm_wf))coefficients
+
+## do we need to do the workflow before the autoplot???
+
+#data <- augment(wf, new_data = camels_test)
+#dim(data)
+
+#ggplot(data, aes(x = observed, y = predicted, colour = aridity)) +
+  #scale_color_continuous() +
+  #labs(
+   # title = "Observed vs. Predicted values", color = "blue"
+ # )
+
+```
