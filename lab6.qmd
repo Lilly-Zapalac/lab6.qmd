@@ -103,42 +103,59 @@ neural_network_model <- bag_mlp(hidden_units = 5, penalty = 0.01) |>
 print(neural_network_model)
   
 ```
+```{r}
+library(baguette)
+rf_model <- rand_forest() %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("regression")
+
+# Define model
+lm_model <- linear_reg() %>%
+  set_engine("lm") %>%
+  set_mode("regression")
+
+
+```
 
 ```{r}
-wf <- workflow_set(list(rec), list(boost_model, neural_network_model)) |>
+wf <- workflow_set(list(rec), list(boost_model, neural_network_model, rf_model, lm_model)) |>
   workflow_map('fit_resamples', resamples = camels_folds)
 
 autoplot(wf)
 ```
 
 ```{r}
-## The linear and random forest models have lower variability than the boost and nueral network models. I would random forest model because it has the lowest range.
+## I think the bag_mlp is the best model because it has the highest rsq value.
 ```
 
-Question 4:
 
+
+
+Question 4
 ```{r}
+
+
 ##data splitting
-set.seed(671)
+set.seed(577)
 camels_select <- camels |>
-  mutate(logQmean = log(q_mean)) |>
-  select(logQmean, aridity, p_mean, pet_mean, p_seasonality)
+  mutate(logQmean = log(q_mean + 1)) |>
+  select(logQmean, aridity, p_mean, pet_mean, p_seasonality) %>% 
+  drop_na()
 
 camels_split <- initial_split(camels_select, prop = 0.75)
 camels_training <- training(camels_split)
 camels_testing <- testing(camels_split)
 
-camels_folds4 <- vfold_cv(camels_train, v = 10)
+camels_folds4 <- vfold_cv(camels_training, v = 10)
   
 ```
 
 ```{r}
 ##recipe
 second_rec <- recipe(logQmean ~ ., data = camels_training) |>
-  step_log(all_predictors()) |>
+  #step_log(all_predictors()) |>
   step_normalize(all_predictors()) |>
-  step_interact(terms = ~ aridity:p_mean) |>
-  step_naomit(all_predictors(), all_outcomes())
+  step_interact(terms = ~ aridity:p_mean)
 
 ## I chose this formula because I need all data that I selected to see if there is a relationship. Camels training is the data with the selected variables.
 
@@ -151,7 +168,7 @@ rand_model <- rand_forest() |>
   set_mode("regression")
 
 linear_model <- linear_reg() |>
-  set_engine("stan") |>
+  set_engine("lm") |>
   set_mode("regression")
 
 decision_model <- decision_tree() |>
@@ -162,45 +179,40 @@ decision_model <- decision_tree() |>
 
 ```{r}
 ##workflow set
-#wf4 <- workflow_set(list(second_rec), list(rand_model, linear_model, decision_model)) |>
-  #workflow_map('fit_resamples', resamples = camels_folds4)
+wf4 <- workflow_set(list(second_rec), list(rand_model, linear_model, decision_model)) |>
+  workflow_map('fit_resamples', resamples = camels_folds4)
 ```
 
 ```{r}
 ##evaluation
 
-#autoplot(wf4)
+autoplot(wf4)
 
-#rank_results(wf, rank_metric = "rsq", select_best = TRUE)
+rank_results(wf, rank_metric = "rsq", select_best = TRUE)
 
-##describe what model you think is best and why
+##I think the random forest model is the best because it has a high rsq value.
 ```
 
 ```{r}
 ##extract and evaluate
-
-#lm_model <- linear_reg() %>%
   #set_engine("lm") %>%
   #set_mode("regression")
 
-# Instantiate a workflow ...
-#lm_wf <- workflow() %>%
-  #add_recipe(rec) %>%
- # add_model(linear_model) %>%
-  #fit(data = camels_train) 
+ #Instantiate a workflow ...
+rf_wf <- workflow() %>%
+  add_recipe(rec) %>%
+  add_model(rand_model) %>%
+  fit(data = camels_train) 
 
-# Extract the model coefficients from the workflow
-#summary(extract_fit_engine(lm_wf))coefficients
+data <- augment(rf_wf, new_data = camels_test)
+dim(data)
 
-## do we need to do the workflow before the autoplot???
-
-#data <- augment(wf, new_data = camels_test)
-#dim(data)
-
-#ggplot(data, aes(x = observed, y = predicted, colour = aridity)) +
-  #scale_color_continuous() +
-  #labs(
-   # title = "Observed vs. Predicted values", color = "blue"
- # )
+ggplot(data, aes(x = logQmean, y = .pred, colour = aridity)) +
+  geom_point() + 
+  scale_color_continuous() +
+  labs(
+    title = "Observed vs. Predicted values", color = "blue"
+  )
+## I think the results are pretty good since they are following a positive slope, however, there are some that are exactly 1, which seems a little off since that would mean it is perfect.
 
 ```
