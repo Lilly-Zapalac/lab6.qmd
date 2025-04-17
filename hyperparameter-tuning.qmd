@@ -1,0 +1,215 @@
+---
+title: "hyperparamter-tuning"
+format: html
+editor: visual
+---
+
+Libraries
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(purrr)
+library(glue)
+library(powerjoin)
+library(visdat)
+library(dplyr)
+library(skimr)
+library(ggpubr)
+library(ggplot2)
+```
+
+Data import/tidy/transfom
+
+```{r}
+root  <- 'https://gdex.ucar.edu/dataset/camels/file'
+
+download.file('https://gdex.ucar.edu/dataset/camels/file/camels_attributes_v2.0.pdf', 
+              'data/camels_attributes_v2.0.pdf')
+types <- c("clim", "geol", "soil", "topo", "vege", "hydro")
+
+remote_files <- glue('{root}/camels_{types}.txt')
+data <- glue('data/camels_{types}.txt')
+walk2(remote_files, data, download.file, quiet = TRUE)
+camels <- map(data, read_delim, show_col_types = FALSE) 
+camels <- power_full_join(camels ,by = 'gauge_id')
+
+```
+
+```{r}
+
+skimr:: skim(camels)
+vis_dat(camels)
+
+ggplot(camels, aes(x = aridity, y = q_mean)) +
+  geom_point()
+
+
+```
+
+Data splitting
+
+```{r}
+set.seed(567)
+camels_select8 <- camels |>
+  mutate(logQmean = log(q_mean +1)) |>
+  select(logQmean, aridity, p_mean, pet_mean, p_seasonality, gauge_lat, gauge_lon) |>
+  drop_na()
+
+camels_split8 <- initial_split(camels_select8, prop = .80)
+camels_train8 <- training(camels_split8)
+camels_test8 <- testing(camels_split8)
+
+
+```
+
+```{r}
+rec8 <- recipe(logQmean ~ ., data = camels_train8) |>
+  #step_log(all_predictors()) %>% 
+  step_normalize(all_predictors()) |>
+  step_interact(terms = ~ aridity:p_mean) |>
+  step_rm(gauge_lat, gauge_lon)
+```
+
+Resampling and Model Testing
+
+```{r}
+camels_folds8 <- vfold_cv(camels_train8, v = 10)
+```
+
+```{r}
+rand_model <- rand_forest() |>
+  set_engine("ranger") |>
+  set_mode("regression")
+
+linear_model <- linear_reg() |>
+  set_engine("lm") |>
+  set_mode("regression")
+
+decision_model <- decision_tree() |>
+  set_engine("rpart") |>
+  set_mode("regression")
+```
+
+Test the models
+
+```{r}
+wf8 <- workflow_set(list(rec8), list(rand_model, linear_model, decision_model)) |>
+  workflow_map('fit_resamples', resamples = camels_folds8)
+```
+
+```{r}
+autoplot(wf8)
+```
+
+Model Selection
+
+```{r}
+##I am choosing the random forest model because it has the highest rsq value and the lowest rmse value. Therefore, this shows that random forest shows the best correlation.
+##The random forst model is a classification model with an engine of ranger and a mode of regression. I think this model worked so well because it can handle both numerical and categorical data. It also works well with missing data.
+```
+
+Build a model for your chosen specification
+
+```{r}
+library(tune)
+rand_model_tune <- rand_forest(trees = tune(), min_n = tune()) |>
+  set_engine("ranger") |>
+  set_mode("regression")
+```
+
+```{r}
+wf_tune <- workflow(rec8, rand_model_tune)
+```
+
+```{r}
+camels_metrics = metric_set(rsq, rmse, mae)
+dials <- extract_parameter_set_dials(wf_tune)
+dials$object
+```
+
+```{r}
+my.grid <- dials %>%
+  grid_space_filling(size = 20)
+```
+
+```{r}
+model_params <-  tune_grid(
+    wf_tune,
+    resamples = camels_folds8,
+    grid = my.grid,
+    metrics = metric_set(rmse, rsq, mae),
+    control = control_grid(save_pred = TRUE)
+  )
+
+autoplot(model_params)
+```
+
+```{r}
+collect_metrics(model_params)
+## I am seeing the difference between the three metrics. The rsq is high while the rmse and mae is really low showing that the graphs are good.
+```
+
+```{r}
+show_best(model_params, metric = "mae")
+## I am seeing the best of all of the mean absolute error and since the lowest mean is for trees 1579 this is the best for this metric.
+```
+
+```{r}
+hp_best <- select_best(model_params, metric = "mae")
+```
+
+Finalize your model
+
+```{r}
+final_workflow <- finalize_workflow(wf_tune, hp_best) 
+
+lf <- last_fit(final_workflow, camels_split8, metrics = camels_metrics)
+```
+
+Final Model Verification
+
+```{r}
+collect_metrics(lf)
+collect_predictions(lf) |>
+  ggplot(aes(x = .pred, y = logQmean)) +
+  geom_point(aes(color = logQmean)) +
+  geom_smooth(method = "lm") +
+  geom_abline() +
+  scale_color_gradient(low = "green", high = "darkgreen")+
+  ggthemes::theme_clean()
+  labs(title = "Final",
+       x = "Predicted",
+       y = "Actual") 
+  
+```
+
+Building a map
+
+```{r}
+
+full_pred = fit(final_workflow, data = camels_select8) |>
+  augment(new_data = camels_select8) |>
+  mutate(diff = .pred - logQmean)
+
+
+
+
+
+p1 <- ggplot(data = full_pred, aes(x = gauge_lon, y = gauge_lat)) +
+  borders("state", colour = "gray") +
+  geom_point(aes(color = logQmean)) +
+  scale_color_gradient(low = "lavender", high = "purple") +
+  ggthemes::theme_map()
+
+p2 <- ggplot(data = full_pred, aes(x = gauge_lon, y = gauge_lat)) +
+  borders("state", colour = "gray") +
+  geom_point(aes(color = diff)) +
+  scale_color_gradient(low = "lightblue", high = "black") +
+  ggthemes::theme_map()
+```
+
+```{r}
+library(patchwork)
+p1 + p2
+```
